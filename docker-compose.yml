@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  ffmpeg-renderer:
+    build: .
+    container_name: ffmpeg-renderer
+    restart: unless-stopped
+    environment:
+      SHARED_SECRET: ${SHARED_SECRET}
+      MAX_RENDER_MS: 1800000
+    # No `ports:` — keep this internal-only.
+    # n8n reaches it via the shared Docker network on http://ffmpeg-renderer:3000
+
+networks:
+  default:
+    name: dokploy-network
+    external: true

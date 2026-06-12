@@ -1,0 +1,12 @@
+{
+  "name": "n8n-ffmpeg-renderer",
+  "version": "1.0.0",
+  "description": "HTTP wrapper that executes ffmpeg render scripts produced by n8n",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

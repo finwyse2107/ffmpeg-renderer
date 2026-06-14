@@ -47,8 +47,14 @@ app.post('/render', (req, res) => {
   let responded = false;
   const respondOnce = (fn) => { if (!responded) { responded = true; fn(); } };
 
-  child.stdout.on('data', (d) => { stdout += d; });
-  child.stderr.on('data', (d) => { stderr += d; });
+  child.stdout.on('data', (d) => {
+    stdout += d;
+    process.stdout.write(`[${id}|out] ${d}`);
+  });
+  child.stderr.on('data', (d) => {
+    stderr += d;
+    process.stderr.write(`[${id}|err] ${d}`);
+  });
 
   const timer = setTimeout(() => {
     console.error(`[${id}] timeout after ${MAX_RENDER_MS}ms — killing`);

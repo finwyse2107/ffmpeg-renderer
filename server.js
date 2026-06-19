@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 const SHARED_SECRET = process.env.SHARED_SECRET || '';
 const MAX_RENDER_MS = Number(process.env.MAX_RENDER_MS || 30 * 60 * 1000);
 const TMP_ROOT = process.env.TMP_ROOT || os.tmpdir();
+const MAX_LOG_BYTES = Number(process.env.MAX_LOG_BYTES || 256 * 1024);
 
 app.use(express.json({ limit: '20mb' }));
 
@@ -47,12 +48,20 @@ app.post('/render', (req, res) => {
   let responded = false;
   const respondOnce = (fn) => { if (!responded) { responded = true; fn(); } };
 
+  // Bounded append: keep only the most recent MAX_LOG_BYTES of each buffer
+  // so a flood of child output cannot blow past V8's max string length.
+  const appendBounded = (buf, chunk) => {
+    const next = buf + chunk;
+    if (next.length <= MAX_LOG_BYTES) return next;
+    return next.slice(next.length - MAX_LOG_BYTES);
+  };
+
   child.stdout.on('data', (d) => {
-    stdout += d;
+    stdout = appendBounded(stdout, d);
     process.stdout.write(`[${id}|out] ${d}`);
   });
   child.stderr.on('data', (d) => {
-    stderr += d;
+    stderr = appendBounded(stderr, d);
     process.stderr.write(`[${id}|err] ${d}`);
   });
 

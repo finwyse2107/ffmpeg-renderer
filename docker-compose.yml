@@ -7,7 +7,20 @@ services:
     restart: unless-stopped
     environment:
       SHARED_SECRET: ${SHARED_SECRET}
-      MAX_RENDER_MS: 1800000
+      MAX_RENDER_MS: 3600000
+      MAX_LOG_BYTES: 262144
+    # Increase shm + memory headroom for ffmpeg processing many images.
+    shm_size: "256m"
+    mem_limit: 4g
+    memswap_limit: 4g
+    # Healthcheck: lenient so a long-running render is never marked unhealthy.
+    # Interval 5min, timeout 30s, 10 retries = up to ~50min of slow responses tolerated.
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 5m
+      timeout: 30s
+      retries: 10
+      start_period: 30s
     # No `ports:` — internal-only.
     # n8n reaches this container as http://ffmpeg-renderer:3000
     networks:

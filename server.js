@@ -71,12 +71,16 @@ app.post('/thumbnail', (req, res) => {
     line2
       ? `ffmpeg -y -loglevel error -i base.jpg ` +
         `-vf "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,` +
-        `drawtext=text='${esc(line1)}':fontfile=$FONT:fontsize=78:fontcolor=yellow:bordercolor=black:borderw=5:x=(w-text_w)/2:y=h-text_h-150,` +
-        `drawtext=text='${esc(line2)}':fontfile=$FONT:fontsize=78:fontcolor=yellow:bordercolor=black:borderw=5:x=(w-text_w)/2:y=h-text_h-50" ` +
+        // semi-opaque black bar behind 2 lines, large bold yellow text on top
+        `drawbox=x=0:y=h-260:w=iw:h=260:color=black@0.65:t=fill,` +
+        `drawtext=text='${esc(line1)}':fontfile=$FONT:fontsize=82:fontcolor=yellow:bordercolor=black:borderw=4:x=(w-text_w)/2:y=h-220,` +
+        `drawtext=text='${esc(line2)}':fontfile=$FONT:fontsize=82:fontcolor=yellow:bordercolor=black:borderw=4:x=(w-text_w)/2:y=h-110" ` +
         `-frames:v 1 -q:v 2 output.jpg`
       : `ffmpeg -y -loglevel error -i base.jpg ` +
         `-vf "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,` +
-        `drawtext=text='${esc(line1)}':fontfile=$FONT:fontsize=80:fontcolor=yellow:bordercolor=black:borderw=5:x=(w-text_w)/2:y=h-text_h-60" ` +
+        // semi-opaque black bar behind 1 line, large bold yellow text on top
+        `drawbox=x=0:y=h-170:w=iw:h=170:color=black@0.65:t=fill,` +
+        `drawtext=text='${esc(line1)}':fontfile=$FONT:fontsize=92:fontcolor=yellow:bordercolor=black:borderw=4:x=(w-text_w)/2:y=h-130" ` +
         `-frames:v 1 -q:v 2 output.jpg`,
   ].join('\n');
 

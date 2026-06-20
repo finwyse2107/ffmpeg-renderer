@@ -5,6 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
     curl \
     ca-certificates \
+    fonts-dejavu-core \
+    fonts-liberation \
+    fonts-noto-core \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

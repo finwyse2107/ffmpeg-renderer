@@ -266,6 +266,192 @@ function tail(str, lines = 50) {
   return str.split('\n').slice(-lines).join('\n');
 }
 
+// ===========================================================================
+// ASYNC RENDER JOBS
+//
+// Added 2026-08-11 for long-form documentary renders (20-30 min output, 100+
+// source clips) which cannot complete inside the synchronous path:
+//   - MAX_RENDER_MS caps a sync render at 30 minutes; these take 45-60+
+//   - the finished mp4 is several hundred MB, and streaming that back through
+//     n8n as a single response buffers the whole file in the worker
+//
+// The existing POST /render is UNCHANGED and still used by the three live
+// long-form channels. This is purely additive.
+//
+//   POST /render/async        {command}  -> 202 {job_id}
+//   GET  /render/status/:id              -> {status, ...}
+//   GET  /render/download/:id            -> streams the mp4, then cleans up
+//   DELETE /render/job/:id               -> abandon and clean up
+// ===========================================================================
+
+const MAX_ASYNC_RENDER_MS = Number(process.env.MAX_ASYNC_RENDER_MS || 3 * 60 * 60 * 1000);
+const MAX_CONCURRENT_ASYNC = Number(process.env.MAX_CONCURRENT_ASYNC || 2);
+// How long a finished job is kept before its work directory is reclaimed.
+// A render is a few hundred MB, so abandoned jobs must not accumulate.
+const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 6 * 60 * 60 * 1000);
+
+const jobs = new Map();
+
+function runningCount() {
+  let n = 0;
+  for (const j of jobs.values()) if (j.status === 'running') n++;
+  return n;
+}
+
+app.post('/render/async', (req, res) => {
+  const { command } = req.body || {};
+  if (typeof command !== 'string' || !command.trim()) {
+    return res.status(400).json({ error: 'missing command' });
+  }
+  if (runningCount() >= MAX_CONCURRENT_ASYNC) {
+    return res.status(429).json({
+      error: 'too many concurrent renders',
+      running: runningCount(),
+      limit: MAX_CONCURRENT_ASYNC,
+    });
+  }
+
+  const id = crypto.randomBytes(8).toString('hex');
+  const workDir = path.join(TMP_ROOT, `arender-${id}`);
+  fs.mkdirSync(workDir, { recursive: true });
+
+  // Same substitution the sync path performs, so commands are interchangeable.
+  const adjustedCommand = command.replace(/\/tmp\/n8n\/test/g, workDir);
+  const scriptPath = path.join(workDir, 'render.sh');
+  fs.writeFileSync(scriptPath, adjustedCommand, { mode: 0o755 });
+
+  const job = {
+    id,
+    status: 'running',
+    workDir,
+    startedAt: Date.now(),
+    finishedAt: null,
+    exitCode: null,
+    error: null,
+    stdout: '',
+    stderr: '',
+    bytes: null,
+  };
+  jobs.set(id, job);
+
+  console.log(`[async ${id}] starting in ${workDir}`);
+  const child = spawn('bash', [scriptPath], { cwd: workDir });
+  job.pid = child.pid;
+
+  const appendBounded = (buf, chunk) => {
+    const next = buf + chunk;
+    if (next.length <= MAX_LOG_BYTES) return next;
+    return next.slice(next.length - MAX_LOG_BYTES);
+  };
+  child.stdout.on('data', (d) => { job.stdout = appendBounded(job.stdout, d); });
+  child.stderr.on('data', (d) => { job.stderr = appendBounded(job.stderr, d); });
+
+  const timer = setTimeout(() => {
+    console.error(`[async ${id}] timeout after ${MAX_ASYNC_RENDER_MS}ms — killing`);
+    job.status = 'failed';
+    job.error = 'render timeout';
+    job.finishedAt = Date.now();
+    child.kill('SIGKILL');
+  }, MAX_ASYNC_RENDER_MS);
+
+  child.on('error', (err) => {
+    clearTimeout(timer);
+    job.status = 'failed';
+    job.error = err.message;
+    job.finishedAt = Date.now();
+    console.error(`[async ${id}] spawn error:`, err);
+  });
+
+  child.on('close', (code) => {
+    clearTimeout(timer);
+    if (job.status === 'failed') return;   // already timed out
+    job.exitCode = code;
+    job.finishedAt = Date.now();
+
+    if (code !== 0) {
+      job.status = 'failed';
+      job.error = 'render failed';
+      console.error(`[async ${id}] exit ${code} in ${job.finishedAt - job.startedAt}ms`);
+      return;
+    }
+    const outputPath = path.join(workDir, 'final_output.mp4');
+    if (!fs.existsSync(outputPath)) {
+      job.status = 'failed';
+      job.error = 'output file not produced';
+      job.expected = outputPath;
+      return;
+    }
+    job.status = 'done';
+    job.bytes = fs.statSync(outputPath).size;
+    console.log(`[async ${id}] done in ${job.finishedAt - job.startedAt}ms, ${job.bytes} bytes`);
+  });
+
+  res.status(202).json({ job_id: id, status: 'running' });
+});
+
+app.get('/render/status/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'unknown job' });
+  res.json({
+    job_id: job.id,
+    status: job.status,                       // running | done | failed
+    elapsed_ms: (job.finishedAt || Date.now()) - job.startedAt,
+    exitCode: job.exitCode,
+    error: job.error,
+    bytes: job.bytes,
+    // Logs are the only diagnostic once the work directory is gone.
+    stderr: job.status === 'failed' ? tail(job.stderr) : undefined,
+    stdout: job.status === 'failed' ? tail(job.stdout) : undefined,
+  });
+});
+
+app.get('/render/download/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'unknown job' });
+  if (job.status === 'running') return res.status(409).json({ error: 'still running' });
+  if (job.status !== 'done') {
+    return res.status(500).json({ error: job.error || 'render failed', stderr: tail(job.stderr) });
+  }
+  const outputPath = path.join(job.workDir, 'final_output.mp4');
+  if (!fs.existsSync(outputPath)) {
+    return res.status(410).json({ error: 'output already reclaimed' });
+  }
+  const stat = fs.statSync(outputPath);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Length', stat.size);
+  res.setHeader('Content-Disposition', `attachment; filename="video-${job.id}.mp4"`);
+  const stream = fs.createReadStream(outputPath);
+  stream.on('close', () => {
+    // Only reclaim once the bytes are actually delivered.
+    cleanup(job.workDir);
+    job.status = 'collected';
+  });
+  stream.on('error', (err) => console.error(`[async ${job.id}] stream error:`, err));
+  stream.pipe(res);
+});
+
+app.delete('/render/job/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'unknown job' });
+  cleanup(job.workDir);
+  jobs.delete(req.params.id);
+  res.json({ ok: true });
+});
+
+// Reclaim abandoned jobs. Without this a failed poller leaks a few hundred MB
+// per run until the disk fills.
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    const age = now - (job.finishedAt || job.startedAt);
+    if (job.status !== 'running' && age > JOB_TTL_MS) {
+      cleanup(job.workDir);
+      jobs.delete(id);
+      console.log(`[async ${id}] reclaimed after ${Math.round(age / 60000)}m`);
+    }
+  }
+}, 10 * 60 * 1000).unref();
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`ffmpeg-renderer listening on :${PORT} (auth=${SHARED_SECRET ? 'on' : 'OFF — internal only!'})`);
 });
